@@ -1,0 +1,77 @@
+name: Backend
+
+# The audit's single most useful finding was that the app did not build and
+# nobody knew. This workflow exists so that can never be true again.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+defaults:
+  run:
+    working-directory: backend
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      APP_ENV: test
+      SESSION_SECRET: ci-secret-value-that-is-long-enough-32
+      DATABASE_URL: postgresql+asyncpg://hackverse:hackverse@localhost:5432/hackverse
+      REDIS_URL: redis://localhost:6379/0
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: hackverse
+          POSTGRES_PASSWORD: hackverse
+          POSTGRES_DB: hackverse
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - run: uv sync --group dev
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Format check
+        run: uv run ruff format --check .
+
+      - name: App builds
+        # Catches the class of failure that made the service unstartable:
+        # dependency-injection mistakes and missing extras surface here.
+        run: uv run python -c "from app.main import create_app; create_app()"
+
+      - name: Migrations apply and are reversible
+        run: |
+          uv run alembic upgrade head
+          uv run alembic downgrade -1
+          uv run alembic upgrade head
+
+      - name: Schema matches models
+        # Fails if a model changed without a migration.
+        run: uv run python scripts/check_schema_drift.py
+
+      - name: Tests
+        run: uv run pytest -q
